@@ -1,0 +1,11 @@
+{
+  "name": "clubnight",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev:frontend": "cd frontend && npm start",
+    "dev:backend": "cd backend && npm run dev",
+    "install:all": "cd frontend && npm install && cd ../backend && npm install && cd ../netlify/functions && npm install",
+    "build": "cd frontend && npm run build"
+  }
+}
