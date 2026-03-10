@@ -26,6 +26,97 @@ let bookings = [];
 
 let sessions = [];
 
+// ── Live Court State ─────────────────────────────────────────────────────────
+// Add this in-memory state near the top of backend/src/index.js,
+// alongside the existing let players/courts/bookings/sessions declarations:
+
+let liveCourtPlayers = {}; // { courtId: [playerId, ...] }
+let waitingList = [];       // [playerId, ...]
+
+// GET /api/live — full live state
+app.get('/api/live', (req, res) => {
+  res.json({ courtPlayers: liveCourtPlayers, waitingList });
+});
+
+// POST /api/live/join — add player to court (auto-overflow to waiting if desired)
+app.post('/api/live/join', (req, res) => {
+  const { courtId, playerId } = req.body;
+  if (!courtId || !playerId) return res.status(400).json({ error: 'courtId and playerId required' });
+
+  const court = courts.find(c => c.id === courtId);
+  const player = players.find(p => p.id === playerId);
+  if (!court) return res.status(404).json({ error: 'Court not found' });
+  if (!player) return res.status(404).json({ error: 'Player not found' });
+
+  // Remove from wherever they are first
+  Object.keys(liveCourtPlayers).forEach(cid => {
+    liveCourtPlayers[cid] = liveCourtPlayers[cid].filter(id => id !== playerId);
+  });
+  waitingList = waitingList.filter(id => id !== playerId);
+
+  // Add to court
+  if (!liveCourtPlayers[courtId]) liveCourtPlayers[courtId] = [];
+  liveCourtPlayers[courtId].push(playerId);
+
+  res.json({ courtPlayers: liveCourtPlayers, waitingList });
+});
+
+// POST /api/live/leave — remove player from a specific court
+app.post('/api/live/leave', (req, res) => {
+  const { courtId, playerId } = req.body;
+  if (!courtId || !playerId) return res.status(400).json({ error: 'courtId and playerId required' });
+
+  if (liveCourtPlayers[courtId]) {
+    liveCourtPlayers[courtId] = liveCourtPlayers[courtId].filter(id => id !== playerId);
+  }
+  res.json({ courtPlayers: liveCourtPlayers, waitingList });
+});
+
+// POST /api/live/waiting/join — add player to waiting list
+app.post('/api/live/waiting/join', (req, res) => {
+  const { playerId } = req.body;
+  if (!playerId) return res.status(400).json({ error: 'playerId required' });
+
+  const player = players.find(p => p.id === playerId);
+  if (!player) return res.status(404).json({ error: 'Player not found' });
+
+  if (waitingList.includes(playerId)) return res.status(409).json({ error: 'Already in waiting list' });
+
+  // Remove from any court first
+  Object.keys(liveCourtPlayers).forEach(cid => {
+    liveCourtPlayers[cid] = liveCourtPlayers[cid].filter(id => id !== playerId);
+  });
+
+  waitingList.push(playerId);
+  res.json({ courtPlayers: liveCourtPlayers, waitingList });
+});
+
+// POST /api/live/waiting/leave — remove player from waiting list
+app.post('/api/live/waiting/leave', (req, res) => {
+  const { playerId } = req.body;
+  waitingList = waitingList.filter(id => id !== playerId);
+  res.json({ courtPlayers: liveCourtPlayers, waitingList });
+});
+
+// POST /api/live/waiting/assign — move player from waiting list to a court
+app.post('/api/live/waiting/assign', (req, res) => {
+  const { playerId, courtId } = req.body;
+  if (!playerId || !courtId) return res.status(400).json({ error: 'playerId and courtId required' });
+
+  const court = courts.find(c => c.id === courtId);
+  if (!court) return res.status(404).json({ error: 'Court not found' });
+
+  waitingList = waitingList.filter(id => id !== playerId);
+
+  if (!liveCourtPlayers[courtId]) liveCourtPlayers[courtId] = [];
+  if (!liveCourtPlayers[courtId].includes(playerId)) {
+    liveCourtPlayers[courtId].push(playerId);
+  }
+
+  res.json({ courtPlayers: liveCourtPlayers, waitingList });
+});
+
+
 // ── Players ──────────────────────────────────────────────────────────────────
 app.get('/api/players', (req, res) => res.json(players));
 

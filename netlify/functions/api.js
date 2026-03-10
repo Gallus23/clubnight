@@ -39,6 +39,100 @@ app.delete('/api/players/:id', async (req, res) => {
   res.json({ success: true });
 });
 
+// ── Live Court State (Supabase version) ──────────────────────────────────────
+// Add these routes to netlify/functions/api.js
+// Requires a `live_court_state` table in Supabase with columns:
+//   id TEXT PRIMARY KEY,  value JSONB NOT NULL
+//
+// Run this SQL in Supabase to create the table and seed the row:
+//   CREATE TABLE live_court_state (id TEXT PRIMARY KEY, value JSONB NOT NULL);
+//   INSERT INTO live_court_state VALUES ('state', '{"courtPlayers":{},"waitingList":[]}');
+
+async function getLiveState() {
+  const { data } = await supabase.from('live_court_state').select('value').eq('id', 'state').single();
+  return data?.value || { courtPlayers: {}, waitingList: [] };
+}
+
+async function setLiveState(state) {
+  await supabase.from('live_court_state').upsert({ id: 'state', value: state });
+  return state;
+}
+
+app.get('/api/live', async (req, res) => {
+  const state = await getLiveState();
+  res.json(state);
+});
+
+app.post('/api/live/join', async (req, res) => {
+  const { courtId, playerId } = req.body;
+  if (!courtId || !playerId) return res.status(400).json({ error: 'courtId and playerId required' });
+
+  const state = await getLiveState();
+
+  // Remove from wherever they currently are
+  Object.keys(state.courtPlayers).forEach(cid => {
+    state.courtPlayers[cid] = state.courtPlayers[cid].filter(id => id !== playerId);
+  });
+  state.waitingList = state.waitingList.filter(id => id !== playerId);
+
+  if (!state.courtPlayers[courtId]) state.courtPlayers[courtId] = [];
+  state.courtPlayers[courtId].push(playerId);
+
+  res.json(await setLiveState(state));
+});
+
+app.post('/api/live/leave', async (req, res) => {
+  const { courtId, playerId } = req.body;
+  if (!courtId || !playerId) return res.status(400).json({ error: 'courtId and playerId required' });
+
+  const state = await getLiveState();
+  if (state.courtPlayers[courtId]) {
+    state.courtPlayers[courtId] = state.courtPlayers[courtId].filter(id => id !== playerId);
+  }
+  res.json(await setLiveState(state));
+});
+
+app.post('/api/live/waiting/join', async (req, res) => {
+  const { playerId } = req.body;
+  if (!playerId) return res.status(400).json({ error: 'playerId required' });
+
+  const state = await getLiveState();
+  if (state.waitingList.includes(playerId)) {
+    return res.status(409).json({ error: 'Already in waiting list' });
+  }
+
+  // Remove from any court
+  Object.keys(state.courtPlayers).forEach(cid => {
+    state.courtPlayers[cid] = state.courtPlayers[cid].filter(id => id !== playerId);
+  });
+
+  state.waitingList.push(playerId);
+  res.json(await setLiveState(state));
+});
+
+app.post('/api/live/waiting/leave', async (req, res) => {
+  const { playerId } = req.body;
+  const state = await getLiveState();
+  state.waitingList = state.waitingList.filter(id => id !== playerId);
+  res.json(await setLiveState(state));
+});
+
+app.post('/api/live/waiting/assign', async (req, res) => {
+  const { playerId, courtId } = req.body;
+  if (!playerId || !courtId) return res.status(400).json({ error: 'playerId and courtId required' });
+
+  const state = await getLiveState();
+  state.waitingList = state.waitingList.filter(id => id !== playerId);
+
+  if (!state.courtPlayers[courtId]) state.courtPlayers[courtId] = [];
+  if (!state.courtPlayers[courtId].includes(playerId)) {
+    state.courtPlayers[courtId].push(playerId);
+  }
+
+  res.json(await setLiveState(state));
+});
+
+
 // ── Courts ───────────────────────────────────────────────────────────────────
 app.get('/api/courts', async (req, res) => {
   const { data, error } = await supabase.from('courts').select('*').order('name');
