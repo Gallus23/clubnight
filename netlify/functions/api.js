@@ -1,110 +1,194 @@
 const express = require('express');
 const serverless = require('serverless-http');
 const cors = require('cors');
-const { v4: uuidv4 } = require('uuid');
+const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// ── In-memory store (resets per cold start — swap for a DB in production) ────
-let players = [
-  { id: '1', name: 'Alex Chen', email: 'alex@example.com', level: 'Advanced', joined: '2024-01-15', wins: 24, losses: 8, points: 1420 },
-  { id: '2', name: 'Sam Rivera', email: 'sam@example.com', level: 'Intermediate', joined: '2024-02-01', wins: 15, losses: 12, points: 1180 },
-  { id: '3', name: 'Jordan Lee', email: 'jordan@example.com', level: 'Beginner', joined: '2024-03-10', wins: 5, losses: 9, points: 940 },
-  { id: '4', name: 'Morgan Kim', email: 'morgan@example.com', level: 'Advanced', joined: '2024-01-20', wins: 21, losses: 10, points: 1350 },
-  { id: '5', name: 'Casey Park', email: 'casey@example.com', level: 'Intermediate', joined: '2024-02-18', wins: 12, losses: 15, points: 1050 },
-];
-let courts = [
-  { id: 'c1', name: 'Court 1', status: 'available' },
-  { id: 'c2', name: 'Court 2', status: 'available' },
-  { id: 'c3', name: 'Court 3', status: 'available' },
-  { id: 'c4', name: 'Court 4', status: 'available' },
-];
-let bookings = [];
-let sessions = [];
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_KEY
+);
 
-// Players
-app.get('/api/players', (req, res) => res.json(players));
-app.post('/api/players', (req, res) => {
+// ── Players ──────────────────────────────────────────────────────────────────
+app.get('/api/players', async (req, res) => {
+  const { data, error } = await supabase.from('players').select('*').order('points', { ascending: false });
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data);
+});
+
+app.post('/api/players', async (req, res) => {
   const { name, email, level } = req.body;
   if (!name || !email) return res.status(400).json({ error: 'Name and email required' });
-  const player = { id: uuidv4(), name, email, level: level || 'Beginner', joined: new Date().toISOString().split('T')[0], wins: 0, losses: 0, points: 800 };
-  players.push(player);
-  res.status(201).json(player);
+  const { data, error } = await supabase.from('players').insert({ name, email, level: level || 'Beginner' }).select().single();
+  if (error) return res.status(500).json({ error: error.message });
+  res.status(201).json(data);
 });
-app.put('/api/players/:id', (req, res) => {
-  const idx = players.findIndex(p => p.id === req.params.id);
-  if (idx === -1) return res.status(404).json({ error: 'Player not found' });
-  players[idx] = { ...players[idx], ...req.body };
-  res.json(players[idx]);
+
+app.put('/api/players/:id', async (req, res) => {
+  const { data, error } = await supabase.from('players').update(req.body).eq('id', req.params.id).select().single();
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data);
 });
-app.delete('/api/players/:id', (req, res) => {
-  players = players.filter(p => p.id !== req.params.id);
+
+app.delete('/api/players/:id', async (req, res) => {
+  const { error } = await supabase.from('players').delete().eq('id', req.params.id);
+  if (error) return res.status(500).json({ error: error.message });
   res.json({ success: true });
 });
 
-// Courts
-app.get('/api/courts', (req, res) => res.json(courts));
+// ── Courts ───────────────────────────────────────────────────────────────────
+app.get('/api/courts', async (req, res) => {
+  const { data, error } = await supabase.from('courts').select('*').order('name');
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data);
+});
 
-// Bookings
-app.get('/api/bookings', (req, res) => res.json(bookings));
-app.post('/api/bookings', (req, res) => {
+// ── Bookings ─────────────────────────────────────────────────────────────────
+app.get('/api/bookings', async (req, res) => {
+  const { data, error } = await supabase
+    .from('bookings')
+    .select('*, courts(name), players(name)')
+    .order('date', { ascending: false });
+  if (error) return res.status(500).json({ error: error.message });
+  const flat = data.map(b => ({
+    ...b,
+    courtName: b.courts?.name,
+    playerName: b.players?.name,
+    courtId: b.court_id,
+    playerId: b.player_id,
+    startTime: b.start_time,
+    endTime: b.end_time,
+  }));
+  res.json(flat);
+});
+
+app.post('/api/bookings', async (req, res) => {
   const { courtId, playerId, date, startTime, endTime, type } = req.body;
-  if (!courtId || !playerId || !date || !startTime || !endTime) return res.status(400).json({ error: 'Missing required fields' });
-  const conflict = bookings.find(b => b.courtId === courtId && b.date === date && b.status === 'confirmed' && ((startTime >= b.startTime && startTime < b.endTime) || (endTime > b.startTime && endTime <= b.endTime)));
-  if (conflict) return res.status(409).json({ error: 'Court already booked for this time' });
-  const court = courts.find(c => c.id === courtId);
-  const player = players.find(p => p.id === playerId);
-  const booking = { id: uuidv4(), courtId, playerId, courtName: court?.name, playerName: player?.name, date, startTime, endTime, type: type || 'casual', status: 'confirmed', createdAt: new Date().toISOString() };
-  bookings.push(booking);
-  res.status(201).json(booking);
+  if (!courtId || !playerId || !date || !startTime || !endTime)
+    return res.status(400).json({ error: 'Missing required fields' });
+
+  const { data: conflicts } = await supabase
+    .from('bookings')
+    .select('id')
+    .eq('court_id', courtId)
+    .eq('date', date)
+    .eq('status', 'confirmed')
+    .lt('start_time', endTime)
+    .gt('end_time', startTime);
+
+  if (conflicts?.length > 0)
+    return res.status(409).json({ error: 'Court already booked for this time' });
+
+  const { data, error } = await supabase
+    .from('bookings')
+    .insert({ court_id: courtId, player_id: playerId, date, start_time: startTime, end_time: endTime, type: type || 'casual' })
+    .select('*, courts(name), players(name)')
+    .single();
+
+  if (error) return res.status(500).json({ error: error.message });
+  res.status(201).json({
+    ...data,
+    courtName: data.courts?.name,
+    playerName: data.players?.name,
+    courtId: data.court_id,
+    playerId: data.player_id,
+    startTime: data.start_time,
+    endTime: data.end_time,
+  });
 });
-app.delete('/api/bookings/:id', (req, res) => {
-  bookings = bookings.filter(b => b.id !== req.params.id);
+
+app.delete('/api/bookings/:id', async (req, res) => {
+  const { error } = await supabase.from('bookings').delete().eq('id', req.params.id);
+  if (error) return res.status(500).json({ error: error.message });
   res.json({ success: true });
 });
 
-// Sessions
-app.get('/api/sessions', (req, res) => res.json(sessions));
-app.post('/api/sessions', (req, res) => {
+// ── Sessions ─────────────────────────────────────────────────────────────────
+app.get('/api/sessions', async (req, res) => {
+  const { data: sessions, error } = await supabase.from('sessions').select('*').order('date');
+  if (error) return res.status(500).json({ error: error.message });
+
+  const { data: enrollments } = await supabase.from('session_enrollments').select('session_id, player_id');
+  const grouped = {};
+  (enrollments || []).forEach(e => {
+    if (!grouped[e.session_id]) grouped[e.session_id] = [];
+    grouped[e.session_id].push(e.player_id);
+  });
+
+  res.json(sessions.map(s => ({ ...s, maxPlayers: s.max_players, enrolled: grouped[s.id] || [] })));
+});
+
+app.post('/api/sessions', async (req, res) => {
   const { name, date, maxPlayers, fee } = req.body;
   if (!name || !date) return res.status(400).json({ error: 'Name and date required' });
-  const session = { id: uuidv4(), name, date, maxPlayers: maxPlayers || 20, fee: fee || 0, enrolled: [], status: 'upcoming', createdAt: new Date().toISOString() };
-  sessions.push(session);
-  res.status(201).json(session);
+  const { data, error } = await supabase
+    .from('sessions')
+    .insert({ name, date, max_players: maxPlayers || 20, fee: fee || 0 })
+    .select().single();
+  if (error) return res.status(500).json({ error: error.message });
+  res.status(201).json({ ...data, maxPlayers: data.max_players, enrolled: [] });
 });
-app.post('/api/sessions/:id/enroll', (req, res) => {
-  const session = sessions.find(s => s.id === req.params.id);
-  if (!session) return res.status(404).json({ error: 'Session not found' });
+
+app.post('/api/sessions/:id/enroll', async (req, res) => {
   const { playerId } = req.body;
-  if (session.enrolled.includes(playerId)) return res.status(409).json({ error: 'Already enrolled' });
-  if (session.enrolled.length >= session.maxPlayers) return res.status(409).json({ error: 'Session full' });
-  session.enrolled.push(playerId);
-  res.json(session);
-});
-app.post('/api/sessions/:id/result', (req, res) => {
-  const { winnerId, loserId } = req.body;
-  const winner = players.find(p => p.id === winnerId);
-  const loser = players.find(p => p.id === loserId);
-  if (winner) { winner.wins++; winner.points += 30; }
-  if (loser) { loser.losses++; loser.points = Math.max(0, loser.points - 10); }
-  res.json({ success: true });
-});
-app.delete('/api/sessions/:id', (req, res) => {
-  sessions = sessions.filter(s => s.id !== req.params.id);
+  const sessionId = req.params.id;
+
+  const { data: session } = await supabase.from('sessions').select('max_players').eq('id', sessionId).single();
+  const { count } = await supabase.from('session_enrollments').select('*', { count: 'exact', head: true }).eq('session_id', sessionId);
+
+  if (count >= session.max_players) return res.status(409).json({ error: 'Session full' });
+
+  const { error } = await supabase.from('session_enrollments').insert({ session_id: sessionId, player_id: playerId });
+  if (error) return res.status(error.code === '23505' ? 409 : 500).json({ error: error.message });
   res.json({ success: true });
 });
 
-// Leaderboard
-app.get('/api/leaderboard', (req, res) => {
-  const ranked = [...players].sort((a, b) => b.points - a.points).map((p, i) => ({ ...p, rank: i + 1, winRate: p.wins + p.losses > 0 ? Math.round((p.wins / (p.wins + p.losses)) * 100) : 0 }));
+app.post('/api/sessions/:id/result', async (req, res) => {
+  const { winnerId, loserId } = req.body;
+
+  const [{ data: winner }, { data: loser }] = await Promise.all([
+    supabase.from('players').select('wins, points').eq('id', winnerId).single(),
+    supabase.from('players').select('losses, points').eq('id', loserId).single(),
+  ]);
+
+  await Promise.all([
+    winner && supabase.from('players').update({ wins: winner.wins + 1, points: winner.points + 30 }).eq('id', winnerId),
+    loser && supabase.from('players').update({ losses: loser.losses + 1, points: Math.max(0, loser.points - 10) }).eq('id', loserId),
+  ]);
+
+  res.json({ success: true });
+});
+
+app.delete('/api/sessions/:id', async (req, res) => {
+  const { error } = await supabase.from('sessions').delete().eq('id', req.params.id);
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ success: true });
+});
+
+// ── Leaderboard ──────────────────────────────────────────────────────────────
+app.get('/api/leaderboard', async (req, res) => {
+  const { data, error } = await supabase.from('players').select('*').order('points', { ascending: false });
+  if (error) return res.status(500).json({ error: error.message });
+  const ranked = data.map((p, i) => ({
+    ...p,
+    rank: i + 1,
+    winRate: p.wins + p.losses > 0 ? Math.round((p.wins / (p.wins + p.losses)) * 100) : 0,
+  }));
   res.json(ranked);
 });
 
-// Stats
-app.get('/api/stats', (req, res) => {
-  res.json({ totalPlayers: players.length, totalBookings: bookings.length, activeSessions: sessions.filter(s => s.status === 'upcoming').length, totalCourts: courts.length });
+// ── Stats ────────────────────────────────────────────────────────────────────
+app.get('/api/stats', async (req, res) => {
+  const [{ count: totalPlayers }, { count: totalBookings }, { count: activeSessions }, { count: totalCourts }] = await Promise.all([
+    supabase.from('players').select('*', { count: 'exact', head: true }),
+    supabase.from('bookings').select('*', { count: 'exact', head: true }),
+    supabase.from('sessions').select('*', { count: 'exact', head: true }).eq('status', 'upcoming'),
+    supabase.from('courts').select('*', { count: 'exact', head: true }),
+  ]);
+  res.json({ totalPlayers, totalBookings, activeSessions, totalCourts });
 });
 
 module.exports.handler = serverless(app);
